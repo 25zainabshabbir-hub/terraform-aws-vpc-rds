@@ -1,0 +1,94 @@
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Project name (same as used for apply)'
+        type: string
+        default: demo
+      environment:
+        description: 'Environment to DESTROY'
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+        default: dev
+      confirm:
+        description: 'Type the environment name again to confirm (e.g. dev)'
+        type: string
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-north-1
+  TF_ENV: ${{ inputs.environment }}
+  TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+  TF_VAR_project: ${{ inputs.project }}
+  TF_VAR_environment: ${{ inputs.environment }}
+
+jobs:
+  plan-destroy:
+    name: 1 - Confirm and Preview Destroy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "${{ inputs.environment }}" ]; then
+            echo "::error::Confirmation '${{ inputs.confirm }}' does not match environment '${{ inputs.environment }}'. Nothing was destroyed."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Init
+        run: terraform init -input=false -backend-config="key=vpc-rds/${TF_ENV}/terraform.tfstate"
+
+      - name: Show what will be destroyed
+        run: terraform plan -destroy -input=false
+
+  destroy:
+    name: 2 - Destroy
+    needs: plan-destroy
+    runs-on: ubuntu-latest
+    environment: production   # waits for approval
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Init
+        run: terraform init -input=false -backend-config="key=vpc-rds/${TF_ENV}/terraform.tfstate"
+
+      - name: Destroy
+        run: terraform destroy -auto-approve -input=false
+
+      - name: Confirm nothing is left in state
+        run: |
+          COUNT=$(terraform state list | wc -l)
+          echo "Resources left in state: $COUNT"
+          {
+            echo "## Destroy result (${TF_ENV})"
+            echo "Resources left in state: $COUNT"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$COUNT" -eq 0 ] || exit 1
