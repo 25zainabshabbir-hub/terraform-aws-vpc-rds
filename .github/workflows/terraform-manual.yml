@@ -1,0 +1,169 @@
+name: Terraform Manual Run and Health Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What do you want to do?'
+        type: choice
+        options:
+          - plan
+          - apply
+          - check
+        default: plan
+      project:
+        description: 'Project name'
+        type: string
+        default: demo
+      environment:
+        description: 'Environment'
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+        default: dev
+      db_instance_class:
+        description: 'Database size'
+        type: choice
+        options:
+          - db.t3.micro
+          - db.t3.small
+        default: db.t3.micro
+  schedule:
+    - cron: '0 */6 * * *'   # timer: every 6 hours (UTC)
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-north-1
+  TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+  TF_VAR_project: ${{ inputs.project || 'demo' }}
+  TF_VAR_environment: ${{ inputs.environment || 'dev' }}
+  TF_VAR_db_instance_class: ${{ inputs.db_instance_class || 'db.t3.micro' }}
+
+jobs:
+  plan:
+    name: Plan
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'check'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false
+      - run: terraform validate
+      - run: terraform plan -input=false
+
+  apply:
+    name: Apply
+    needs: plan
+    if: inputs.action == 'apply'
+    runs-on: ubuntu-latest
+    environment: production   # waits for approval
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false
+      - run: terraform apply -auto-approve -input=false
+
+  health:
+    name: Health Check
+    needs: apply
+    # runs on the timer, on action=check, and right after a successful apply
+    if: >-
+      always() && !cancelled() &&
+      (github.event_name == 'schedule' ||
+       inputs.action == 'check' ||
+       needs.apply.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: terraform init -input=false
+
+      - name: Show Terraform outputs and resources
+        run: |
+          {
+            echo "## Terraform outputs"
+            echo '```'
+            terraform output
+            echo '```'
+            echo "## Resources in state"
+            echo '```'
+            terraform state list
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify resources in AWS
+        run: |
+          VPC_ID=$(terraform output -raw vpc_id)
+          DB_ID=$(terraform show -json | jq -r '[.values.root_module.child_modules[]?.resources[]? | select(.type=="aws_db_instance") | .values.identifier][0] // empty')
+
+          FAILED=0
+          {
+            echo "## AWS verification"
+            echo "| Resource | Status |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          VPC_STATE=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].State' --output text 2>/dev/null || echo "MISSING")
+          echo "| VPC $VPC_ID | $VPC_STATE |" >> "$GITHUB_STEP_SUMMARY"
+          [ "$VPC_STATE" = "available" ] || FAILED=1
+
+          SUBNET_COUNT=$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$VPC_ID" --query 'length(Subnets)' --output text 2>/dev/null || echo 0)
+          echo "| Subnets (expected 3) | $SUBNET_COUNT found |" >> "$GITHUB_STEP_SUMMARY"
+          [ "$SUBNET_COUNT" = "3" ] || FAILED=1
+
+          DB_STATUS=$(aws rds describe-db-instances --db-instance-identifier "$DB_ID" --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null || echo "MISSING")
+          echo "| RDS $DB_ID | $DB_STATUS |" >> "$GITHUB_STEP_SUMMARY"
+          [ "$DB_STATUS" = "available" ] || FAILED=1
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::One or more resources are missing or not healthy"
+            exit 1
+          fi
+
+      - name: Check for drift (missing or changed resources)
+        if: always()
+        run: |
+          set +e
+          terraform plan -detailed-exitcode -input=false
+          CODE=$?
+          set -e
+          if [ "$CODE" -eq 2 ]; then
+            echo "::error::Drift found: a resource is missing or was changed outside Terraform"
+            exit 1
+          elif [ "$CODE" -eq 1 ]; then
+            echo "::error::Terraform plan failed"
+            exit 1
+          fi
+          echo "Everything matches the code."
