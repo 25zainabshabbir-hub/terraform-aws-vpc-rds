@@ -22,13 +22,13 @@ module "network" {
 module "database" {
   source             = "./modules/database"
   name               = local.name
-  vpc_id             = module.network.vpc_id              # output → input
-  private_subnet_ids = module.network.private_subnet_ids  # output → input
+  vpc_id             = module.network.vpc_id             # output → input
+  private_subnet_ids = module.network.private_subnet_ids # output → input
   allowed_cidr       = module.network.public_subnet_cidr
   db_name            = "appdb"
   db_username        = "admin_user"
   tags               = local.tags
-  db_password = var.db_password
+  db_password        = var.db_password
 }
 
 #Each module block means: "go to that folder, run its code, and use these values as its inputs." The key idea 
