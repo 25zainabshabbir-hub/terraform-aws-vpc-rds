@@ -1,15 +1,15 @@
-name: Terraform Manual Run and Health Check
+name: Terraform Stages and Health Check
 
 on:
   workflow_dispatch:
     inputs:
-      action:
-        description: 'What do you want to do?'
+      stage:
+        description: 'Run up to which stage?'
         type: choice
         options:
+          - init
           - plan
           - apply
-          - check
         default: plan
       project:
         description: 'Project name'
@@ -23,13 +23,6 @@ on:
           - test
           - prod
         default: dev
-      db_instance_class:
-        description: 'Database size'
-        type: choice
-        options:
-          - db.t3.micro
-          - db.t3.small
-        default: db.t3.micro
   schedule:
     - cron: '0 */6 * * *'   # timer: every 6 hours (UTC)
 
@@ -39,15 +32,15 @@ permissions:
 
 env:
   AWS_REGION: eu-north-1
+  TF_ENV: ${{ inputs.environment || 'dev' }}   # single source for env name and state key
   TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
   TF_VAR_project: ${{ inputs.project || 'demo' }}
   TF_VAR_environment: ${{ inputs.environment || 'dev' }}
-  TF_VAR_db_instance_class: ${{ inputs.db_instance_class || 'db.t3.micro' }}
 
 jobs:
-  plan:
-    name: Plan
-    if: github.event_name == 'workflow_dispatch' && inputs.action != 'check'
+  init:
+    name: 1 - Init, Format, Validate
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,14 +54,42 @@ jobs:
           role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
           aws-region: ${{ env.AWS_REGION }}
 
-      - run: terraform init -input=false
-      - run: terraform validate
-      - run: terraform plan -input=false
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Init
+        run: terraform init -input=false -backend-config="key=vpc-rds/${TF_ENV}/terraform.tfstate"
+
+      - name: Validate
+        run: terraform validate
+
+  plan:
+    name: 2 - Plan
+    needs: init
+    if: inputs.stage == 'plan' || inputs.stage == 'apply'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Init
+        run: terraform init -input=false -backend-config="key=vpc-rds/${TF_ENV}/terraform.tfstate"
+
+      - name: Plan
+        run: terraform plan -input=false
 
   apply:
-    name: Apply
+    name: 3 - Apply
     needs: plan
-    if: inputs.action == 'apply'
+    if: inputs.stage == 'apply'
     runs-on: ubuntu-latest
     environment: production   # waits for approval
     steps:
@@ -83,18 +104,19 @@ jobs:
           role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
           aws-region: ${{ env.AWS_REGION }}
 
-      - run: terraform init -input=false
-      - run: terraform apply -auto-approve -input=false
+      - name: Init
+        run: terraform init -input=false -backend-config="key=vpc-rds/${TF_ENV}/terraform.tfstate"
+
+      - name: Apply
+        run: terraform apply -auto-approve -input=false
 
   health:
-    name: Health Check
+    name: 4 - Health Check
     needs: apply
-    # runs on the timer, on action=check, and right after a successful apply
+    # runs on the timer, and right after a successful apply
     if: >-
       always() && !cancelled() &&
-      (github.event_name == 'schedule' ||
-       inputs.action == 'check' ||
-       needs.apply.result == 'success')
+      (github.event_name == 'schedule' || needs.apply.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,9 +130,10 @@ jobs:
           role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
           aws-region: ${{ env.AWS_REGION }}
 
-      - run: terraform init -input=false
+      - name: Init
+        run: terraform init -input=false -backend-config="key=vpc-rds/${TF_ENV}/terraform.tfstate"
 
-      - name: Show Terraform outputs and resources
+      - name: Show outputs and resources
         run: |
           {
             echo "## Terraform outputs"
