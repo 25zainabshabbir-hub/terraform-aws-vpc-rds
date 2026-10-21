@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
 
+permissions:
+  id-token: write
+  contents: read
+
 env:
   AWS_REGION: eu-north-1
   TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
@@ -19,12 +23,11 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.11.0   # use the version from your local "terraform version"
+          terraform_version: 1.11.0   # must match your local "terraform version"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Format check
@@ -54,8 +57,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::954935267955:role/Terraform_Pipeline_Role
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Init
