@@ -18,3 +18,11 @@ variable "db_password" {
   type      = string
   sensitive = true
 }
+
+variable "my_ip" {
+  type = string
+}
+
+variable "ssh_public_key" {
+  type = string
+}

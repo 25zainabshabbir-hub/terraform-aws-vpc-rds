@@ -31,6 +31,16 @@ module "database" {
   db_password        = var.db_password
 }
 
+module "compute" {
+  source         = "./modules/compute"
+  name           = local.name
+  vpc_id         = module.network.vpc_id
+  subnet_id      = module.network.public_subnet_id
+  ssh_cidr       = var.my_ip
+  ssh_public_key = var.ssh_public_key
+  tags           = local.tags
+}
+
 #Each module block means: "go to that folder, run its code, and use these values as its inputs." The key idea 
 #is the lines with module.network.xxx: the network module's outputs feed the database module's inputs. That is 
 #also how Terraform knows to build the network first and the database second (an implicit dependency)
