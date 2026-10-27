@@ -23,8 +23,8 @@ on:
           - test
           - prod
         default: dev
-  schedule:
-    - cron: '0 */6 * * *'   # timer: every 6 hours (UTC)
+ # schedule:
+  #  - cron: '0 */6 * * *'   # timer: every 6 hours (UTC)
 
 permissions:
   id-token: write
